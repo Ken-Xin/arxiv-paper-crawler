@@ -19,7 +19,7 @@ REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN")
 TARGET_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
 SEARCH_QUERY = '(ti:"semantic" OR abs:"semantic") AND (ti:"V2X" OR ti:"vehicular" OR ti:"autonomous driving" OR abs:"V2X" OR abs:"vehicular")'
-MAX_SEARCH_RESULTS = 10
+MAX_SEARCH_RESULTS = 100
 DOWNLOAD_INTERVAL = 10.0
 # =======================================
 
