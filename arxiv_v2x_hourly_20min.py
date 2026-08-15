@@ -12,8 +12,8 @@ from google.oauth2.credentials import Credentials
 CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET")
 REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN")
+TARGET_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
-TARGET_FOLDER_NAME = "V2X_SemCom_Research"
 SEARCH_QUERY = '(ti:"semantic" OR abs:"semantic") AND (ti:"V2X" OR ti:"vehicular" OR ti:"autonomous driving" OR abs:"V2X" OR abs:"vehicular")'
 MAX_SEARCH_RESULTS = 10
 DOWNLOAD_INTERVAL = 10.0
@@ -22,7 +22,7 @@ DOWNLOAD_INTERVAL = 10.0
 def get_drive_service():
     """OAuth 2.0 Credentials (Refresh Token) からDrive APIクライアントを初期化"""
     if not (CLIENT_ID and CLIENT_SECRET and REFRESH_TOKEN):
-        raise ValueError("OAuth認証情報（GDRIVE_CLIENT_ID / CLIENT_SECRET / REFRESH_TOKEN）が設定されていません。")
+        raise ValueError("OAuth認証情報が設定されていません。")
 
     creds = Credentials(
         None,
@@ -34,23 +34,8 @@ def get_drive_service():
     )
     return build("drive", "v3", credentials=creds)
 
-def find_folder_id_by_name(drive_service, folder_name):
-    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get("files", [])
-    
-    if not files:
-        # 見つからない場合はフォルダを新規作成
-        file_metadata = {
-            'name': folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        folder = drive_service.files().create(body=file_metadata, fields='id').execute()
-        return folder.get('id')
-    
-    return files[0]["id"]
-
 def get_existing_arxiv_ids(drive_service, folder_id):
+    """指定フォルダ内の既存ファイルからarXiv IDを収集"""
     existing_ids = set()
     query = f"'{folder_id}' in parents and trashed = false"
     page_token = None
@@ -79,8 +64,8 @@ def main():
     print(f"[{now_str}] arXiv 論文自動収集タスクを開始します...")
 
     drive_service = get_drive_service()
-    folder_id = find_folder_id_by_name(drive_service, TARGET_FOLDER_NAME)
-    print(f"ターゲットフォルダを確認: {TARGET_FOLDER_NAME} (ID: {folder_id})")
+    folder_id = TARGET_FOLDER_ID
+    print(f"ターゲットフォルダID: {folder_id}")
 
     existing_ids = get_existing_arxiv_ids(drive_service, folder_id)
     print(f"現在Drive内に存在する論文数: {len(existing_ids)} 件")
