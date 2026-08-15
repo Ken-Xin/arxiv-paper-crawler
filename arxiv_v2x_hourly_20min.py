@@ -1,51 +1,56 @@
 import os
 import io
 import time
-import json
 import datetime
 import urllib.request
 import arxiv
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials
 
 # ================= 設定 =================
-# GitHub Secrets からJSON文字列を取得
-SERVICE_ACCOUNT_JSON_STR = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
-TARGET_FOLDER_NAME = "V2X_SemCom_Research"     # 対象のGoogle Driveフォルダ名
+CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID")
+CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET")
+REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN")
 
-# 車両 × セマンティック通信の検索クエリ
+TARGET_FOLDER_NAME = "V2X_SemCom_Research"
 SEARCH_QUERY = '(ti:"semantic" OR abs:"semantic") AND (ti:"V2X" OR ti:"vehicular" OR ti:"autonomous driving" OR abs:"V2X" OR abs:"vehicular")'
-
-MAX_SEARCH_RESULTS = 10      # 1回の実行でチェックする最新論文数
-DOWNLOAD_INTERVAL = 10.0     # arXiv負荷軽減のための待機秒数（10秒以上を厳守）
+MAX_SEARCH_RESULTS = 10
+DOWNLOAD_INTERVAL = 10.0
 # =======================================
 
 def get_drive_service():
-    """環境変数のJSON文字列からGoogle Drive APIクライアントを初期化"""
-    if not SERVICE_ACCOUNT_JSON_STR:
-        raise ValueError("環境変数 GDRIVE_SERVICE_ACCOUNT_JSON が設定されていません。GitHub Secretsを確認してください。")
-    
-    info = json.loads(SERVICE_ACCOUNT_JSON_STR)
-    creds = Credentials.from_service_account_info(
-        info,
-        scopes=["https://www.googleapis.com/auth/drive"]
+    """OAuth 2.0 Credentials (Refresh Token) からDrive APIクライアントを初期化"""
+    if not (CLIENT_ID and CLIENT_SECRET and REFRESH_TOKEN):
+        raise ValueError("OAuth認証情報（GDRIVE_CLIENT_ID / CLIENT_SECRET / REFRESH_TOKEN）が設定されていません。")
+
+    creds = Credentials(
+        None,
+        refresh_token=REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        scopes=["https://www.googleapis.com/auth/drive.file"]
     )
     return build("drive", "v3", credentials=creds)
 
 def find_folder_id_by_name(drive_service, folder_name):
-    """フォルダ名からGoogle Drive上のフォルダIDを取得"""
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get("files", [])
     
     if not files:
-        raise FileNotFoundError(f"Google Drive上にフォルダ '{folder_name}' が見つかりませんでした。サービスアカウントへの共有設定を確認してください。")
+        # 見つからない場合はフォルダを新規作成
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        folder = drive_service.files().create(body=file_metadata, fields='id').execute()
+        return folder.get('id')
     
     return files[0]["id"]
 
 def get_existing_arxiv_ids(drive_service, folder_id):
-    """フォルダ内のファイル名から既存のarXiv IDを走査して重複を防止"""
     existing_ids = set()
     query = f"'{folder_id}' in parents and trashed = false"
     page_token = None
@@ -61,7 +66,6 @@ def get_existing_arxiv_ids(drive_service, folder_id):
             name = item.get("name", "")
             parts = name.split("_")
             if len(parts) > 1:
-                # バージョン表記(v1等)を除去したベースIDを記録
                 existing_ids.add(parts[0].split("v")[0])
                 
         page_token = results.get("nextPageToken")
@@ -101,7 +105,6 @@ def main():
         raw_id = result.get_short_id()
         base_id = raw_id.split("v")[0]
 
-        # 重複チェック
         if base_id in existing_ids:
             print(f"[スキップ (取得済み)]: {base_id} - {result.title[:40]}...")
             continue
@@ -110,7 +113,6 @@ def main():
         safe_title = "".join(c for c in result.title if c.isalnum() or c in (' ', '_', '-')).rstrip()
         filename = f"{raw_id}_{safe_title[:50]}.pdf"
 
-        # arXiv規約遵守のためのウェイト
         print(f"   (arXivアクセス間隔として {DOWNLOAD_INTERVAL} 秒待機中...)")
         time.sleep(DOWNLOAD_INTERVAL)
 
