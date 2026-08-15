@@ -4,9 +4,13 @@ import time
 import datetime
 import urllib.request
 import arxiv
+import math
+import requests
+from datetime import datetime as dt
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.credentials import Credentials
+
 
 # ================= 設定 =================
 CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID")
@@ -59,6 +63,49 @@ def get_existing_arxiv_ids(drive_service, folder_id):
             
     return existing_ids
 
+def get_paper_metrics(arxiv_id):
+    """Semantic Scholar APIを用いて被引用数とVenue・出版年を取得"""
+    base_id = arxiv_id.split('v')[0]
+    url = f"https://api.semanticscholar.org/graph/v1/paper/ARXIV:{base_id}?fields=citationCount,venue,publicationDate"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "citations": data.get("citationCount", 0),
+                "venue": data.get("venue", "").lower(),
+                "pub_year": int(data.get("publicationDate", "2000-01-01")[:4]) if data.get("publicationDate") else None
+            }
+    except Exception as e:
+        print(f"   [APIエラー] 外部データ取得失敗: {e}")
+    
+    return {"citations": 0, "venue": "", "pub_year": None}
+
+def calculate_score(metrics, current_year):
+    """簡易スコアの算出とフィルタリング判定"""
+    citations = metrics["citations"]
+    venue = metrics["venue"]
+    pub_year = metrics["pub_year"] or current_year
+    
+    # Recency Weight (例: 過去5年以内なら年数に応じて加点)
+    age = current_year - pub_year
+    recency_weight = max(0, 5 - age) 
+    
+    # Venue Weight (例: V2X/通信系のトップカンファレンスやジャーナルを優遇)
+    venue_weight = 0
+    premium_venues = ["ieee", "infocom", "globecom", "icc", "jsac", "tmc", "twc"]
+    if any(pv in venue for pv in premium_venues):
+        venue_weight = 3
+        
+    # スコア計算: venue_weight + log(citations+1) + recency_weight
+    score = venue_weight + math.log1p(citations) + recency_weight
+    
+    # 被引用数フィルタ（例: 1年以内なら5以上、それ以外は20以上）
+    is_passed = (age <= 1 and citations >= 5) or (citations >= 20)
+    
+    return score, is_passed
+
 def main():
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now_str}] arXiv 論文自動収集タスクを開始します...")
@@ -86,38 +133,59 @@ def main():
     results = list(client.results(search))
     print(f"検索ヒット数: {len(results)} 件")
 
+    current_year = dt.now().year
+    scored_results = []
+
+    # 1. スコアリングとフィルタリング
     for result in results:
         raw_id = result.get_short_id()
         base_id = raw_id.split("v")[0]
 
         if base_id in existing_ids:
-            print(f"[スキップ (取得済み)]: {base_id} - {result.title[:40]}...")
             continue
+            
+        # Semantic Scholar APIのレートリミット（1秒に約1リクエスト）対策
+        time.sleep(1.1) 
+        
+        metrics = get_paper_metrics(base_id)
+        score, is_passed = calculate_score(metrics, current_year)
+        
+        if is_passed:
+            scored_results.append((score, result, metrics))
+            print(f"[候補追加]: {base_id} (スコア: {score:.2f}, 引用: {metrics['citations']})")
+        else:
+            print(f"[スキップ] 基準未達: {base_id} (引用: {metrics['citations']})")
+
+    # 2. スコアの降順にソートし、上位のみ出力（ここでは例として上位5件）
+    scored_results.sort(key=lambda x: x[0], reverse=True)
+    top_results = scored_results[:5]
+
+    # 3. 実際のダウンロードとDrive保存
+    for score, result, metrics in top_results:
+        raw_id = result.get_short_id()
+        base_id = raw_id.split("v")[0]
 
         print(f"\n[新着ダウンロード開始]: {base_id} - {result.title}")
+        print(f"   (スコア: {score:.2f}, 引用数: {metrics['citations']}, Venue: {metrics['venue']})")
+        
         safe_title = "".join(c for c in result.title if c.isalnum() or c in (' ', '_', '-')).rstrip()
         filename = f"{raw_id}_{safe_title[:50]}.pdf"
 
-        print(f"   (arXivアクセス間隔として {DOWNLOAD_INTERVAL} 秒待機中...)")
+        # arXivへのアクセス間隔
         time.sleep(DOWNLOAD_INTERVAL)
 
         try:
             req = urllib.request.Request(
                 result.pdf_url,
-                headers={"User-Agent": "ArXiv-Research-Collector/1.0 (academic research)"}
+                headers={"User-Agent": "ArXiv-Research-Collector/1.0"}
             )
             with urllib.request.urlopen(req) as response:
                 pdf_bytes = response.read()
 
-            file_metadata = {
-                "name": filename,
-                "parents": [folder_id]
-            }
+            file_metadata = {"name": filename, "parents": [folder_id]}
             media = MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf")
             drive_service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id"
+                body=file_metadata, media_body=media, fields="id"
             ).execute()
 
             print(f"   ✓ Google Driveへ保存完了: {filename}")
