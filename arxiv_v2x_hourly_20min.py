@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import json
 import datetime
 import urllib.request
 import arxiv
@@ -9,33 +10,37 @@ from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.service_account import Credentials
 
 # ================= 設定 =================
-SERVICE_ACCOUNT_FILE = "service_account.json"  # GCPで作成した認証JSONファイル
+# GitHub Secrets からJSON文字列を取得
+SERVICE_ACCOUNT_JSON_STR = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
 TARGET_FOLDER_NAME = "V2X_SemCom_Research"     # 対象のGoogle Driveフォルダ名
 
 # 車両 × セマンティック通信の検索クエリ
 SEARCH_QUERY = '(ti:"semantic" OR abs:"semantic") AND (ti:"V2X" OR ti:"vehicular" OR ti:"autonomous driving" OR abs:"V2X" OR abs:"vehicular")'
 
-MAX_SEARCH_RESULTS = 10      # 1回の巡回でチェックする最新論文数
+MAX_SEARCH_RESULTS = 10      # 1回の実行でチェックする最新論文数
 DOWNLOAD_INTERVAL = 10.0     # arXiv負荷軽減のための待機秒数（10秒以上を厳守）
-TARGET_MINUTE = 20           # 実行する分（毎時20分）
 # =======================================
 
 def get_drive_service():
-    """Google Drive APIクライアントの初期化"""
-    creds = Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
+    """環境変数のJSON文字列からGoogle Drive APIクライアントを初期化"""
+    if not SERVICE_ACCOUNT_JSON_STR:
+        raise ValueError("環境変数 GDRIVE_SERVICE_ACCOUNT_JSON が設定されていません。GitHub Secretsを確認してください。")
+    
+    info = json.loads(SERVICE_ACCOUNT_JSON_STR)
+    creds = Credentials.from_service_account_info(
+        info,
         scopes=["https://www.googleapis.com/auth/drive"]
     )
     return build("drive", "v3", credentials=creds)
 
 def find_folder_id_by_name(drive_service, folder_name):
-    """フォルダ名からGoogle Drive上のフォルダIDを自動取得"""
+    """フォルダ名からGoogle Drive上のフォルダIDを取得"""
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get("files", [])
     
     if not files:
-        raise FileNotFoundError(f"Google Drive上にフォルダ '{folder_name}' が見つかりませんでした。共有設定を確認してください。")
+        raise FileNotFoundError(f"Google Drive上にフォルダ '{folder_name}' が見つかりませんでした。サービスアカウントへの共有設定を確認してください。")
     
     return files[0]["id"]
 
@@ -65,10 +70,13 @@ def get_existing_arxiv_ids(drive_service, folder_id):
             
     return existing_ids
 
-def run_crawl_and_upload(drive_service, folder_id):
-    """毎時20分に実行されるクローラー本体"""
+def main():
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{now_str}] 毎時20分の定期チェックを開始します...")
+    print(f"[{now_str}] arXiv 論文自動収集タスクを開始します...")
+
+    drive_service = get_drive_service()
+    folder_id = find_folder_id_by_name(drive_service, TARGET_FOLDER_NAME)
+    print(f"ターゲットフォルダを確認: {TARGET_FOLDER_NAME} (ID: {folder_id})")
 
     existing_ids = get_existing_arxiv_ids(drive_service, folder_id)
     print(f"現在Drive内に存在する論文数: {len(existing_ids)} 件")
@@ -87,6 +95,7 @@ def run_crawl_and_upload(drive_service, folder_id):
 
     downloaded = 0
     results = list(client.results(search))
+    print(f"検索ヒット数: {len(results)} 件")
 
     for result in results:
         raw_id = result.get_short_id()
@@ -94,9 +103,10 @@ def run_crawl_and_upload(drive_service, folder_id):
 
         # 重複チェック
         if base_id in existing_ids:
+            print(f"[スキップ (取得済み)]: {base_id} - {result.title[:40]}...")
             continue
 
-        print(f"-> 新着論文を発見: [{base_id}] {result.title[:45]}...")
+        print(f"\n[新着ダウンロード開始]: {base_id} - {result.title}")
         safe_title = "".join(c for c in result.title if c.isalnum() or c in (' ', '_', '-')).rstrip()
         filename = f"{raw_id}_{safe_title[:50]}.pdf"
 
@@ -123,51 +133,14 @@ def run_crawl_and_upload(drive_service, folder_id):
                 fields="id"
             ).execute()
 
-            print(f"   ✓ Google Drive ({TARGET_FOLDER_NAME}) へ保存完了: {filename}")
+            print(f"   ✓ Google Driveへ保存完了: {filename}")
             existing_ids.add(base_id)
             downloaded += 1
 
         except Exception as e:
             print(f"   ✗ ダウンロード失敗 ({base_id}): {e}")
 
-    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 巡回完了 (新規保存: {downloaded} 件)")
-
-def sleep_until_next_target_minute(target_minute):
-    """次の毎時 XX 分 00 秒までの秒数を計算してスリープ"""
-    now = datetime.datetime.now()
-    # 次の目標時刻を計算
-    if now.minute < target_minute:
-        next_run = now.replace(minute=target_minute, second=0, microsecond=0)
-    else:
-        # 次の時間の目標分
-        next_run = (now + datetime.timedelta(hours=1)).replace(minute=target_minute, second=0, microsecond=0)
-    
-    sleep_seconds = (next_run - now).total_seconds()
-    print(f"次回実行時刻: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (約 {int(sleep_seconds // 60)} 分待機)")
-    time.sleep(sleep_seconds)
-
-def main():
-    print("=== V2X×SemCom 論文自動取得デーモンを起動しました ===")
-    print(f"実行スケジュール: 毎時 {TARGET_MINUTE} 分")
-    
-    drive_service = get_drive_service()
-    folder_id = find_folder_id_by_name(drive_service, TARGET_FOLDER_NAME)
-    print(f"ターゲットフォルダIDを確認: {folder_id}")
-
-    # 初回起動時に即時1回実行するか、次の20分を待つか
-    # ここでは即座に初回チェックを行い、以降20分周期に乗せます
-    try:
-        run_crawl_and_upload(drive_service, folder_id)
-    except Exception as e:
-        print(f"[警告] 初回実行エラー: {e}")
-
-    while True:
-        try:
-            sleep_until_next_target_minute(TARGET_MINUTE)
-            run_crawl_and_upload(drive_service, folder_id)
-        except Exception as e:
-            print(f"[警告] ループ実行中にエラーが発生しました（次回再試行）: {e}")
-            time.sleep(60)
+    print(f"\n[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 実行完了 (新規保存: {downloaded} 件)")
 
 if __name__ == "__main__":
     main()
