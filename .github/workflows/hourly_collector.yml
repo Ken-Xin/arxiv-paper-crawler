@@ -18,4 +18,4 @@ jobs:
       - name: Run script
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
-        run: python collect_papers.py
+        run: python arxiv_v2x_hourly_20min.py
