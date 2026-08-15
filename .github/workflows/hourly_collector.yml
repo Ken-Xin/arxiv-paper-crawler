@@ -1,0 +1,21 @@
+name: Hourly ArXiv Collector (Every 20 min)
+
+on:
+  schedule:
+    # UTC時間で指定（JST毎時20分 = UTC毎時20分）
+    - cron: '20 * * * *'
+  workflow_dispatch: # 手動で即時テスト実行も可能
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install arxiv google-api-python-client google-auth
+      - name: Run script
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        run: python collect_papers.py
