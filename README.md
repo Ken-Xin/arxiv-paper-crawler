@@ -22,7 +22,7 @@ Google Driveに蓄積された論文PDFは、Google Workspace連携により **G
       ├─ 論文の要約 & 技術的コントリビューション抽出
       ├─ 既存研究との差分・ギャップ分析
       └─ 次世代V2X×セマンティック通信の新規性・研究アイデアの自動発見
----
+```
 
 ## 主な特徴
 
@@ -44,3 +44,4 @@ Google Driveに蓄積された論文PDFは、Google Workspace連携により **G
 ├── get_token.py                  # 【初回認証用】OAuthリフレッシュトークン取得スクリプト（非公開）
 ├── .gitignore                    # 秘密鍵・トークン等の除外設定
 └── README.md
+```
